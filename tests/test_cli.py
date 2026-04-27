@@ -43,7 +43,8 @@ def test_cli_generates_3mf_for_simple_svg(tmp_path: Path) -> None:
     with zipfile.ZipFile(out, "r") as zf:
         assert "3D/3dmodel.model" in zf.namelist()
         model_xml = zf.read("3D/3dmodel.model").decode("utf-8")
-        assert "<basematerials id=\"1\">" in model_xml
-        assert "name=\"image\"" in model_xml
-        assert "name=\"text\"" in model_xml
+        assert "<object id=\"1\" name=\"image\" type=\"model\">" in model_xml
+        assert "<object id=\"2\" name=\"text\" type=\"model\">" in model_xml
+        assert "<item objectid=\"1\"/>" in model_xml
+        assert "<item objectid=\"2\"/>" in model_xml
         assert "<triangle" in model_xml

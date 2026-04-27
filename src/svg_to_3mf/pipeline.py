@@ -3,6 +3,9 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -67,6 +70,59 @@ def _svg_size_mm(svg_path: Path) -> tuple[float, float]:
     vb_width = float(parts[2])
     vb_height = float(parts[3])
     return vb_width * UNIT_TO_MM["px"], vb_height * UNIT_TO_MM["px"]
+
+
+def _svg_contains_text(svg_path: Path) -> bool:
+    try:
+        root = ET.fromstring(svg_path.read_text(encoding="utf-8"))
+    except ET.ParseError:
+        return False
+
+    for elem in root.iter():
+        local_name = elem.tag.rsplit("}", 1)[-1]
+        if local_name in {"text", "tspan", "textPath"}:
+            return True
+    return False
+
+
+def _export_text_to_paths(svg_path: Path) -> tuple[Path | None, Path | None]:
+    """Convert SVG text to paths using Inkscape when available.
+
+    Returns (prepared_svg_path, temp_dir_path). If conversion is not possible,
+    returns (None, None) and caller should use the original SVG.
+    """
+    inkscape = shutil.which("inkscape")
+    if not inkscape:
+        return None, None
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="svg_to_3mf_"))
+    prepared_svg = tmp_dir / "prepared.svg"
+
+    commands = [
+        [
+            inkscape,
+            str(svg_path),
+            "--export-type=svg",
+            f"--export-filename={prepared_svg}",
+            "--export-plain-svg",
+            "--export-text-to-path",
+        ],
+        [
+            inkscape,
+            str(svg_path),
+            "--export-type=svg",
+            f"--export-filename={prepared_svg}",
+            "--export-plain-svg",
+        ],
+    ]
+
+    for cmd in commands:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and prepared_svg.exists():
+            return prepared_svg, tmp_dir
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None, None
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -186,40 +242,89 @@ def _apply_face_down_rotation(
     return [(x, max_y - y, max_z - z) for x, y, z in vertices]
 
 
-def _write_3mf(
-    output_3mf: Path,
+def _split_by_material(
     vertices: list[tuple[float, float, float]],
     triangles: list[tuple[int, int, int, int]],
-) -> None:
+    material_index: int,
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Return a compacted (vertices, triangles) pair for a single material."""
+    filtered = [(v1, v2, v3) for v1, v2, v3, mat in triangles if mat == material_index]
+    if not filtered:
+        return [], []
+    used_indices = sorted({idx for tri in filtered for idx in tri})
+    remap = {old: new for new, old in enumerate(used_indices)}
+    new_vertices = [vertices[i] for i in used_indices]
+    new_triangles = [(remap[v1], remap[v2], remap[v3]) for v1, v2, v3 in filtered]
+    return new_vertices, new_triangles
+
+
+def _mesh_xml(
+    obj_id: int,
+    name: str,
+    vertices: list[tuple[float, float, float]],
+    triangles: list[tuple[int, int, int]],
+) -> str:
     verts_xml = "\n".join(
         f'          <vertex x="{x:.6f}" y="{y:.6f}" z="{z:.6f}"/>'
         for x, y, z in vertices
     )
     tris_xml = "\n".join(
-        f'          <triangle v1="{v1}" v2="{v2}" v3="{v3}" pid="1" p1="{mat}"/>'
-        for v1, v2, v3, mat in triangles
+        f'          <triangle v1="{v1}" v2="{v2}" v3="{v3}"/>'
+        for v1, v2, v3 in triangles
     )
+    return (
+        f'    <object id="{obj_id}" name="{name}" type="model">\n'
+        f'      <mesh>\n'
+        f'        <vertices>\n'
+        f'{verts_xml}\n'
+        f'        </vertices>\n'
+        f'        <triangles>\n'
+        f'{tris_xml}\n'
+        f'        </triangles>\n'
+        f'      </mesh>\n'
+        f'    </object>'
+    )
+
+
+def _rect_to_model_xywh(
+    x0: int,
+    x1: int,
+    y0: int,
+    y1: int,
+    scale_x: float,
+    scale_y: float,
+    width_px: int,
+    height_px: int,
+) -> tuple[float, float, float, float]:
+    """Map raster coordinates to model space with top placement and non-mirrored text."""
+    x = (width_px - x1) * scale_x
+    y = y0 * scale_y
+    w = (x1 - x0) * scale_x
+    d = (y1 - y0) * scale_y
+    return x, y, w, d
+
+
+def _write_3mf(
+    output_3mf: Path,
+    verts_image: list[tuple[float, float, float]],
+    tris_image: list[tuple[int, int, int]],
+    verts_text: list[tuple[float, float, float]],
+    tris_text: list[tuple[int, int, int]],
+) -> None:
+    """Write a multipart 3MF with separate build items for image/text."""
+
+    image_obj = _mesh_xml(1, "image", verts_image, tris_image)
+    text_obj = _mesh_xml(2, "text", verts_text, tris_text)
 
     model_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
   <resources>
-    <basematerials id="1">
-      <base name="image" displaycolor="#000000"/>
-      <base name="text" displaycolor="#FF0000"/>
-    </basematerials>
-    <object id="2" type="model">
-      <mesh>
-        <vertices>
-{verts_xml}
-        </vertices>
-        <triangles>
-{tris_xml}
-        </triangles>
-      </mesh>
-    </object>
+{image_obj}
+{text_obj}
   </resources>
   <build>
-    <item objectid="2"/>
+        <item objectid="1"/>
+        <item objectid="2"/>
   </build>
 </model>
 '''
@@ -296,11 +401,25 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
     width_px = max(32, int(round(width_mm * pixels_per_mm)))
     height_px = max(32, int(round(height_mm * pixels_per_mm)))
 
-    png_bytes = cairosvg.svg2png(
-        url=str(config.input_svg),
-        output_width=width_px,
-        output_height=height_px,
-    )
+    raster_svg = config.input_svg
+    temp_dir: Path | None = None
+
+    if _svg_contains_text(config.input_svg):
+        converted_svg, created_tmp_dir = _export_text_to_paths(config.input_svg)
+        if converted_svg is not None:
+            raster_svg = converted_svg
+            temp_dir = created_tmp_dir
+
+    try:
+        png_bytes = cairosvg.svg2png(
+            url=str(raster_svg),
+            output_width=width_px,
+            output_height=height_px,
+        )
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     img = Image.open(BytesIO(png_bytes)).convert("RGBA")
 
     role_to_color: dict[str, tuple[int, int, int]] = {}
@@ -336,7 +455,8 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
         config.rounding_radius_mm / scale_x + config.rounding_radius_mm / scale_y
     ) / 2.0
     rounded_image_mask = _apply_mask_rounding(masks["image"], rounding_radius_pixels)
-    rounded_text_mask = _apply_mask_rounding(masks["text"], rounding_radius_pixels)
+    # Keep text unrounded so glyph shapes remain faithful to the source SVG.
+    rounded_text_mask = masks["text"]
 
     # Give text precedence where rounded masks touch so volumes remain disjoint.
     for y in range(height_px):
@@ -361,15 +481,19 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
             if area_mm2 < config.min_region_area_mm2:
                 continue
 
+            x, y, w, d = _rect_to_model_xywh(
+                x0, x1, y0, y1, scale_x, scale_y, width_px, height_px
+            )
+
             role_counts["image"] += 1
             _add_box(
                 vertices=vertices,
                 triangles=triangles,
-                x=x0 * scale_x,
-                y=y0 * scale_y,
+                x=x,
+                y=y,
                 z=0.0,
-                w=(x1 - x0) * scale_x,
-                d=(y1 - y0) * scale_y,
+                w=w,
+                d=d,
                 h=lower_height_mm,
                 material_index=0,
             )
@@ -383,15 +507,19 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
             if area_mm2 < config.min_region_area_mm2:
                 continue
 
+            x, y, w, d = _rect_to_model_xywh(
+                x0, x1, y0, y1, scale_x, scale_y, width_px, height_px
+            )
+
             role_counts["image"] += 1
             _add_box(
                 vertices=vertices,
                 triangles=triangles,
-                x=x0 * scale_x,
-                y=y0 * scale_y,
+                x=x,
+                y=y,
                 z=upper_z,
-                w=(x1 - x0) * scale_x,
-                d=(y1 - y0) * scale_y,
+                w=w,
+                d=d,
                 h=text_height_mm,
                 material_index=0,
             )
@@ -402,15 +530,19 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
             if area_mm2 < config.min_region_area_mm2:
                 continue
 
+            x, y, w, d = _rect_to_model_xywh(
+                x0, x1, y0, y1, scale_x, scale_y, width_px, height_px
+            )
+
             role_counts["text"] += 1
             _add_box(
                 vertices=vertices,
                 triangles=triangles,
-                x=x0 * scale_x,
-                y=y0 * scale_y,
+                x=x,
+                y=y,
                 z=upper_z,
-                w=(x1 - x0) * scale_x,
-                d=(y1 - y0) * scale_y,
+                w=w,
+                d=d,
                 h=text_height_mm,
                 material_index=1,
             )
@@ -421,15 +553,19 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
             if area_mm2 < config.min_region_area_mm2:
                 continue
 
+            x, y, w, d = _rect_to_model_xywh(
+                x0, x1, y0, y1, scale_x, scale_y, width_px, height_px
+            )
+
             role_counts["image"] += 1
             _add_box(
                 vertices=vertices,
                 triangles=triangles,
-                x=x0 * scale_x,
-                y=y0 * scale_y,
+                x=x,
+                y=y,
                 z=0.0,
-                w=(x1 - x0) * scale_x,
-                d=(y1 - y0) * scale_y,
+                w=w,
+                d=d,
                 h=image_height_mm,
                 material_index=0,
             )
@@ -440,15 +576,19 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
             if area_mm2 < config.min_region_area_mm2:
                 continue
 
+            x, y, w, d = _rect_to_model_xywh(
+                x0, x1, y0, y1, scale_x, scale_y, width_px, height_px
+            )
+
             role_counts["text"] += 1
             _add_box(
                 vertices=vertices,
                 triangles=triangles,
-                x=x0 * scale_x,
-                y=y0 * scale_y,
+                x=x,
+                y=y,
                 z=0.0,
-                w=(x1 - x0) * scale_x,
-                d=(y1 - y0) * scale_y,
+                w=w,
+                d=d,
                 h=text_height_mm,
                 material_index=1,
             )
@@ -462,4 +602,7 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
     if config.bed_side == "face-down":
         vertices = _apply_face_down_rotation(vertices)
 
-    _write_3mf(config.output_3mf, vertices, triangles)
+    verts_image, tris_image = _split_by_material(vertices, triangles, 0)
+    verts_text, tris_text = _split_by_material(vertices, triangles, 1)
+
+    _write_3mf(config.output_3mf, verts_image, tris_image, verts_text, tris_text)
