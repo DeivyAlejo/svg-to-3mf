@@ -332,41 +332,70 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
     scale_x = width_mm / width_px
     scale_y = height_mm / height_px
 
-    # Create a combined mask of all non-empty pixels (image OR text)
-    combined_mask = [
-        [masks["image"][y][x] or masks["text"][y][x] for x in range(width_px)]
-        for y in range(height_px)
-    ]
-
-    # Apply rounding to the combined mask
-    rounding_radius_pixels = (config.rounding_radius_mm / scale_x + config.rounding_radius_mm / scale_y) / 2.0
-    combined_mask = _apply_mask_rounding(combined_mask, rounding_radius_pixels)
+    rounding_radius_pixels = (
+        config.rounding_radius_mm / scale_x + config.rounding_radius_mm / scale_y
+    ) / 2.0
+    rounded_image_mask = _apply_mask_rounding(masks["image"], rounding_radius_pixels)
     rounded_text_mask = _apply_mask_rounding(masks["text"], rounding_radius_pixels)
 
-    # Step 1: Create base extrusion (image material) for all pixels from z=0 to z=image_height
-    base_rectangles = _rectangles_from_mask(combined_mask)
-    for x0, x1, y0, y1 in base_rectangles:
-        area_mm2 = (x1 - x0) * (y1 - y0) * pixel_area_mm2
-        if area_mm2 < config.min_region_area_mm2:
-            continue
+    # Give text precedence where rounded masks touch so volumes remain disjoint.
+    for y in range(height_px):
+        for x in range(width_px):
+            if rounded_text_mask[y][x]:
+                rounded_image_mask[y][x] = False
 
-        role_counts["image"] += 1
-        _add_box(
-            vertices=vertices,
-            triangles=triangles,
-            x=x0 * scale_x,
-            y=y0 * scale_y,
-            z=0.0,
-            w=(x1 - x0) * scale_x,
-            d=(y1 - y0) * scale_y,
-            h=image_height_mm,
-            material_index=0,  # image material
-        )
-
-    # Step 2: Overlay text extrusions (text material) if text is shorter than image
-    # Text extrudes from top of base down to base (creates a recessed/layered effect)
     if text_height_mm < image_height_mm:
-        text_overlay_z = image_height_mm - text_height_mm
+        # Lower layer supports both regions with image material to keep the model unified.
+        lower_height_mm = image_height_mm - text_height_mm
+        combined_mask = [
+            [
+                rounded_image_mask[y][x] or rounded_text_mask[y][x]
+                for x in range(width_px)
+            ]
+            for y in range(height_px)
+        ]
+
+        support_rectangles = _rectangles_from_mask(combined_mask)
+        for x0, x1, y0, y1 in support_rectangles:
+            area_mm2 = (x1 - x0) * (y1 - y0) * pixel_area_mm2
+            if area_mm2 < config.min_region_area_mm2:
+                continue
+
+            role_counts["image"] += 1
+            _add_box(
+                vertices=vertices,
+                triangles=triangles,
+                x=x0 * scale_x,
+                y=y0 * scale_y,
+                z=0.0,
+                w=(x1 - x0) * scale_x,
+                d=(y1 - y0) * scale_y,
+                h=lower_height_mm,
+                material_index=0,
+            )
+
+        # Upper layer is split by role so image/text occupy different triangles.
+        upper_z = lower_height_mm
+
+        image_rectangles = _rectangles_from_mask(rounded_image_mask)
+        for x0, x1, y0, y1 in image_rectangles:
+            area_mm2 = (x1 - x0) * (y1 - y0) * pixel_area_mm2
+            if area_mm2 < config.min_region_area_mm2:
+                continue
+
+            role_counts["image"] += 1
+            _add_box(
+                vertices=vertices,
+                triangles=triangles,
+                x=x0 * scale_x,
+                y=y0 * scale_y,
+                z=upper_z,
+                w=(x1 - x0) * scale_x,
+                d=(y1 - y0) * scale_y,
+                h=text_height_mm,
+                material_index=0,
+            )
+
         text_rectangles = _rectangles_from_mask(rounded_text_mask)
         for x0, x1, y0, y1 in text_rectangles:
             area_mm2 = (x1 - x0) * (y1 - y0) * pixel_area_mm2
@@ -379,14 +408,32 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
                 triangles=triangles,
                 x=x0 * scale_x,
                 y=y0 * scale_y,
-                z=text_overlay_z,
+                z=upper_z,
                 w=(x1 - x0) * scale_x,
                 d=(y1 - y0) * scale_y,
                 h=text_height_mm,
-                material_index=1,  # text material
+                material_index=1,
             )
     else:
-        # If text is taller than or equal to image, overlay it from bottom
+        image_rectangles = _rectangles_from_mask(rounded_image_mask)
+        for x0, x1, y0, y1 in image_rectangles:
+            area_mm2 = (x1 - x0) * (y1 - y0) * pixel_area_mm2
+            if area_mm2 < config.min_region_area_mm2:
+                continue
+
+            role_counts["image"] += 1
+            _add_box(
+                vertices=vertices,
+                triangles=triangles,
+                x=x0 * scale_x,
+                y=y0 * scale_y,
+                z=0.0,
+                w=(x1 - x0) * scale_x,
+                d=(y1 - y0) * scale_y,
+                h=image_height_mm,
+                material_index=0,
+            )
+
         text_rectangles = _rectangles_from_mask(rounded_text_mask)
         for x0, x1, y0, y1 in text_rectangles:
             area_mm2 = (x1 - x0) * (y1 - y0) * pixel_area_mm2
@@ -403,7 +450,7 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
                 w=(x1 - x0) * scale_x,
                 d=(y1 - y0) * scale_y,
                 h=text_height_mm,
-                material_index=1,  # text material
+                material_index=1,
             )
 
     if role_counts["image"] == 0 or role_counts["text"] == 0:
