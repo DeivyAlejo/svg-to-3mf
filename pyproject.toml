@@ -1,0 +1,30 @@
+[project]
+name = "svg-to-3mf-text"
+version = "0.1.0"
+description = "Convert two-color SVG files into one-piece multi-material 3MF models for Bambu Studio."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "cairosvg>=2.7.1",
+  "pillow>=10.3.0",
+  "scipy>=1.13.0",
+  "numpy>=1.24.0",
+]
+
+[project.scripts]
+svg-to-3mf = "svg_to_3mf.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.24.2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/svg_to_3mf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
