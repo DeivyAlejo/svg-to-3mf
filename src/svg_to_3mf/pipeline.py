@@ -397,7 +397,7 @@ def run_conversion(config: ConversionConfig, color_mapping: dict[str, str]) -> N
     if width_mm <= 0 or height_mm <= 0:
         raise ValueError("SVG width/height must be > 0")
 
-    pixels_per_mm = 8.0
+    pixels_per_mm = config.raster_pixels_per_mm
     width_px = max(32, int(round(width_mm * pixels_per_mm)))
     height_px = max(32, int(round(height_mm * pixels_per_mm)))
 

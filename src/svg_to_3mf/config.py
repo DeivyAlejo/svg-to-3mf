@@ -17,6 +17,7 @@ class ConversionConfig:
     rounding_radius_mm: float = 0.4
     auto_detect_colors: bool = False
     min_region_area_mm2: float = 0.01
+    raster_pixels_per_mm: float = 10.0
 
     def validate(self) -> None:
         if not self.input_svg.exists():
@@ -39,6 +40,9 @@ class ConversionConfig:
 
         if self.min_region_area_mm2 < 0:
             raise ValueError("--min-region-area must be >= 0")
+
+        if self.raster_pixels_per_mm <= 0:
+            raise ValueError("--pixels-per-mm must be > 0")
 
         if self.bed_side not in VALID_BED_SIDES:
             raise ValueError(

@@ -61,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.01,
         help="Remove tiny polygon artifacts below this area in mm^2 (default: 0.01)",
     )
+    parser.add_argument(
+        "--pixels-per-mm",
+        type=float,
+        default=10.0,
+        help=(
+            "Rasterization resolution in pixels per mm for SVG segmentation "
+            "(default: 10.0)"
+        ),
+    )
 
     parser.add_argument(
         "--color-map",
@@ -104,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         rounding_radius_mm=args.rounding_radius,
         auto_detect_colors=args.auto_detect_colors,
         min_region_area_mm2=args.min_region_area,
+        raster_pixels_per_mm=args.pixels_per_mm,
     )
 
     try:
